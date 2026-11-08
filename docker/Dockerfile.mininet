@@ -1,0 +1,50 @@
+# Mininet Dockerfile
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    openvswitch-switch \
+    iproute2 \
+    net-tools \
+    iperf3 \
+    tcpdump \
+    wireshark-common \
+    curl \
+    git \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Mininet
+RUN git clone https://github.com/mininet/mininet /tmp/mininet && \
+    cd /tmp/mininet && \
+    git checkout 2.3.0 && \
+    ./util/install.sh -n && \
+    rm -rf /tmp/mininet
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir \
+    pandas \
+    scikit-learn \
+    numpy \
+    matplotlib \
+    prometheus-client \
+    pyyaml \
+    requests
+
+# Set working directory
+WORKDIR /app
+
+# Copy Mininet topology
+COPY mininet /app/mininet
+
+# Create non-root user for Mininet (optional)
+RUN useradd -m -s /bin/bash mininet && \
+    echo "mininet ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Default command
+CMD ["sleep", "infinity"]

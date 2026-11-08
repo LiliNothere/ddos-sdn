@@ -1,0 +1,82 @@
+# Gauge Configuration for Prometheus Metrics Export
+# Works with Faucet to expose flow/port stats for ML service
+
+version: 2
+
+# Prometheus exporter settings
+prometheus:
+  port: 9303
+  addr: "0.0.0.0"
+
+# Faucet connection
+faucet:
+  faucet_config: "/etc/faucet/faucet.yaml"
+  faucet_event_sock: "/var/run/faucet/faucet_event.sock"
+  prometheus_port: 9302
+  prometheus_addr: "0.0.0.0"
+
+# Watcher configuration - which DPs/ports to monitor
+watchers:
+  port_stats:
+    db: "prometheus"
+    interval: 10  # seconds
+    dps: ["s1", "s2", "s3", "s4", "s5", "s6"]
+    metrics:
+      - "of_port_tx_packets"
+      - "of_port_rx_packets"
+      - "of_port_tx_bytes"
+      - "of_port_rx_bytes"
+      - "of_port_tx_errors"
+      - "of_port_rx_errors"
+      - "of_port_dropped"
+
+  flow_table:
+    db: "prometheus"
+    interval: 10  # seconds
+    dps: ["s1", "s2", "s3", "s4", "s5", "s6"]
+    metrics:
+      - "of_flow_packet_count"
+      - "of_flow_byte_count"
+      - "of_flow_duration_seconds"
+      - "of_flow_duration_nanoseconds"
+      - "of_flow_idle_timeout"
+      - "of_flow_hard_timeout"
+      - "of_flow_priority"
+      - "of_flow_cookie"
+
+  flow_stats:
+    db: "prometheus"
+    interval: 10  # seconds - matches Ryu stats request interval
+    dps: ["s1", "s2", "s3", "s4", "s5", "s6"]
+    metrics:
+      - "of_flow_match_in_port"
+      - "of_flow_match_eth_type"
+      - "of_flow_match_ipv4_src"
+      - "of_flow_match_ipv4_dst"
+      - "of_flow_match_ip_proto"
+      - "of_flow_match_tcp_src"
+      - "of_flow_match_tcp_dst"
+      - "of_flow_match_udp_src"
+      - "of_flow_match_udp_dst"
+      - "of_flow_match_icmpv4_type"
+      - "of_flow_match_icmpv4_code"
+
+  meter_stats:
+    db: "prometheus"
+    interval: 10
+    dps: ["s1", "s2", "s3", "s4", "s5", "s6"]
+    metrics:
+      - "of_meter_packet_in_count"
+      - "of_meter_byte_in_count"
+      - "of_meter_duration_seconds"
+      - "of_meter_duration_nanoseconds"
+
+# Output configuration
+output:
+  - type: "prometheus"
+    port: 9303
+    addr: "0.0.0.0"
+
+# Logging
+log_level: "INFO"
+log_file: "/var/log/gauge/gauge.log"

@@ -1,0 +1,52 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'ddos-sdn'
+    environment: 'production'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Faucet Controller metrics
+  - job_name: 'faucet'
+    static_configs:
+      - targets: ['faucet:9302']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Gauge metrics (Faucet telemetry)
+  - job_name: 'gauge'
+    static_configs:
+      - targets: ['faucet:9303']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # ML Service metrics
+  - job_name: 'ml-service'
+    static_configs:
+      - targets: ['ml-service:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Pushgateway for batch jobs
+  - job_name: 'pushgateway'
+    static_configs:
+      - targets: ['pushgateway:9091']
+    honor_labels: true
+
+  # Node Exporter (if available)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+    scrape_interval: 30s

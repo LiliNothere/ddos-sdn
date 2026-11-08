@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package ddos;
+
+option python_package = "ml_service.proto";
+
+// Flow features for ML prediction
+message FlowFeatures {
+  double timestamp = 1;
+  uint64 datapath_id = 2;
+  string flow_id = 3;
+  string ip_src = 4;
+  uint32 tp_src = 5;
+  string ip_dst = 6;
+  uint32 tp_dst = 7;
+  uint32 ip_proto = 8;
+  int32 icmp_code = 9;
+  int32 icmp_type = 10;
+  uint32 flow_duration_sec = 11;
+  uint32 flow_duration_nsec = 12;
+  uint32 idle_timeout = 13;
+  uint32 hard_timeout = 14;
+  uint32 flags = 15;
+  uint64 packet_count = 16;
+  uint64 byte_count = 17;
+  double packet_count_per_second = 18;
+  double packet_count_per_nsecond = 19;
+  double byte_count_per_second = 20;
+  double byte_count_per_nsecond = 21;
+}
+
+// Batch of flows for prediction
+message FlowBatch {
+  repeated FlowFeatures flows = 1;
+  string switch_id = 2;
+  double collection_time = 3;
+}
+
+// Prediction result for a single flow
+message FlowPrediction {
+  string flow_id = 1;
+  int32 label = 2;           // 0 = benign, 1 = ddos
+  double confidence = 3;     // Prediction confidence
+  string switch_id = 4;
+}
+
+// Batch prediction response
+message PredictionResponse {
+  repeated FlowPrediction predictions = 1;
+  int32 total_flows = 2;
+  int32 benign_count = 3;
+  int32 ddos_count = 4;
+  double ddos_percentage = 5;
+  bool attack_detected = 6;
+  string victim_host = 7;    // e.g., "h5"
+  double timestamp = 8;
+}
+
+// Model info
+message ModelInfo {
+  string model_type = 1;     // "RandomForest", "KNN", etc.
+  string version = 2;
+  double accuracy = 3;
+  int32 n_features = 4;
+  map<string, string> params = 5;
+  double trained_at = 6;
+}
+
+// Training request
+message TrainRequest {
+  string model_type = 1;     // "RandomForest", "KNN", "DT", etc.
+  map<string, string> params = 2;
+  string dataset_path = 3;
+}
+
+// Training response
+message TrainResponse {
+  bool success = 1;
+  ModelInfo model_info = 2;
+  string error = 3;
+}
+
+// Mitigation action
+message MitigationAction {
+  enum ActionType {
+    BLOCK_PORT = 0;
+    UNBLOCK_PORT = 1;
+    RATE_LIMIT = 2;
+    REDIRECT = 3;
+  }
+  ActionType action = 1;
+  string switch_id = 2;      // e.g., "s1"
+  uint32 port_number = 3;
+  string reason = 4;
+  int32 duration_seconds = 5; // 0 = permanent
+  double timestamp = 6;
+}
+
+// Mitigation response
+message MitigationResponse {
+  bool success = 1;
+  string action_id = 2;
+  string error = 3;
+}
+
+// Health check
+message HealthRequest {}
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  string model_loaded = 3;
+  double uptime = 4;
+}
+
+// Service definition
+service DDoSService {
+  // Predict flow labels
+  rpc Predict(FlowBatch) returns (PredictionResponse);
+
+  // Train new model
+  rpc Train(TrainRequest) returns (TrainResponse);
+
+  // Get model info
+  rpc GetModelInfo(google.protobuf.Empty) returns (ModelInfo);
+
+  // Apply mitigation action
+  rpc Mitigate(MitigationAction) returns (MitigationResponse);
+
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
