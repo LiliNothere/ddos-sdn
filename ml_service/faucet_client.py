@@ -6,8 +6,8 @@ Communicates with Faucet via REST API and Prometheus metrics
 import asyncio
 import logging
 import time
-import fcntl
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -20,6 +20,14 @@ from prometheus_client import CollectorRegistry, Gauge, Counter, Histogram, push
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+# fcntl is Unix-only; provide fallback for Windows
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+    import msvcrt  # Windows file locking
 
 
 @dataclass
@@ -249,12 +257,17 @@ class FaucetClient:
             return []
 
     async def apply_acl(self, switch_id: str, port: int, block: bool = True) -> bool:
-        """Apply ACL to block/unblock port on switch with atomic file operations"""
+        """Apply ACL to block/unblock port on switch with atomic file operations.
+
+        Updates the block-malicious.yaml ACL file which is included in faucet.yaml.
+        The ACL is applied at VLAN level in faucet.yaml, so we just update the rules.
+        """
         try:
-            # Skip trunk/inter-switch ports (typically port 4, 5 for inter-switch links)
+            # Skip trunk/inter-switch ports (configurable threshold)
             # These are high ports that carry multiple VLANs
-            if port >= 4:
-                logger.warning(f"Refusing to block trunk port {port} on {switch_id}")
+            trunk_threshold = settings.faucet_trunk_port_threshold
+            if port >= trunk_threshold:
+                logger.warning(f"Refusing to block trunk port {port} on {switch_id} (threshold: {trunk_threshold})")
                 self.acl_operations.labels(
                     operation='block' if block else 'unblock',
                     switch=switch_id,
@@ -278,7 +291,7 @@ class FaucetClient:
             success = await self._atomic_acl_update(acl_file, acl_rule, block)
 
             if success:
-                # Trigger Faucet reload
+                # Trigger Faucet reload via SIGHUP
                 await self.reload_faucet_config()
 
                 self.acl_operations.labels(
@@ -307,7 +320,11 @@ class FaucetClient:
             return False
 
     async def _atomic_acl_update(self, acl_file: Path, new_rule: Dict, block: bool) -> bool:
-        """Atomically update ACL file with file locking"""
+        """Atomically update ACL file with file locking (cross-platform).
+
+        The ACL file must be wrapped in an 'acls:' key for Faucet to read it properly.
+        Format: {'acls': {'block-malicious': [rule1, rule2, ...]}}
+        """
         try:
             # Ensure directory exists
             acl_file.parent.mkdir(parents=True, exist_ok=True)
@@ -315,36 +332,59 @@ class FaucetClient:
             # Use file locking for atomic updates
             # Open file for reading/writing
             with open(acl_file, 'a+') as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                # Cross-platform file locking
+                if HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                else:
+                    # Windows: use msvcrt locking
+                    # Get file size before operations to ensure consistent lock length
+                    lock_length = os.path.getsize(acl_file) or 1
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, lock_length)
 
                 try:
                     # Read existing ACL
                     f.seek(0)
                     content = f.read()
-                    acls = yaml.safe_load(content) or []
+                    data = yaml.safe_load(content) or {}
+
+                    # Extract acls dict or create new one
+                    acls = data.get('acls', {})
+                    acl_name = self.acl_name
+
+                    # Get or create the ACL rule list
+                    rules = acls.get(acl_name, [])
 
                     # Update or add rule
                     rule_exists = False
                     port = new_rule['rule']['in_port']
 
-                    for acl in acls:
-                        if acl.get('rule', {}).get('in_port') == port:
-                            acl['rule']['actions']['allow'] = not block
+                    for rule in rules:
+                        if rule.get('rule', {}).get('in_port') == port:
+                            rule['rule']['actions']['allow'] = not block
                             rule_exists = True
                             break
 
                     if not rule_exists:
-                        acls.append(new_rule)
+                        rules.append(new_rule)
 
-                    # Write back
+                    # Update the ACL structure
+                    acls[acl_name] = rules
+                    data['acls'] = acls
+
+                    # Write back with proper structure
                     f.seek(0)
                     f.truncate()
-                    yaml.dump(acls, f, default_flow_style=False)
+                    yaml.dump(data, f, default_flow_style=False)
                     f.flush()
                     os.fsync(f.fileno())
 
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    # Release lock
+                    if HAS_FCNTL:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    else:
+                        # Use same lock_length as when acquiring lock
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, lock_length)
 
             return True
 
@@ -353,14 +393,37 @@ class FaucetClient:
             return False
 
     async def reload_faucet_config(self) -> bool:
-        """Trigger Faucet configuration reload"""
+        """Trigger Faucet configuration reload via SIGHUP signal.
+
+        REST API reload is deprecated. SIGHUP causes Faucet to reload
+        configuration files including ACLs without restarting.
+        """
         try:
-            response = await self.client.post(
-                f"{self.faucet_url}/config/reload"
+            # Send SIGHUP to Faucet process
+            # Faucet typically runs as 'faucet' user or root
+            # We use pkill to find and signal the process
+            import subprocess
+            result = subprocess.run(
+                ['pkill', '-HUP', '-f', 'faucet.faucet'],
+                capture_output=True,
+                timeout=5
             )
-            return response.status_code == 200
+            # pkill returns 0 if process found and signaled, 1 if no process found
+            # Return code 1 means no Faucet process was running - treat as failure
+            if result.returncode == 0:
+                logger.info("Sent SIGHUP to Faucet process for config reload")
+                return True
+            elif result.returncode == 1:
+                logger.error("No Faucet process found (pkill returned 1) - config not reloaded")
+                return False
+            else:
+                logger.error(f"Failed to send SIGHUP (return code {result.returncode}): {result.stderr.decode()}")
+                return False
+        except subprocess.TimeoutExpired:
+            logger.error("SIGHUP command timed out")
+            return False
         except Exception as e:
-            logger.error(f"Failed to reload Faucet config: {e}")
+            logger.error(f"Failed to reload Faucet config via SIGHUP: {e}")
             return False
 
     async def get_switch_status(self) -> Dict[str, Any]:
@@ -417,13 +480,16 @@ class FaucetConfigManager:
         self.acl_dir.mkdir(parents=True, exist_ok=True)
 
     def write_acl(self, name: str, rules: List[Dict]) -> bool:
-        """Write ACL file atomically"""
+        """Write ACL file atomically with proper 'acls:' wrapper"""
         try:
             acl_file = self.acl_dir / f"{name}.yaml"
             temp_file = acl_file.with_suffix('.tmp')
 
+            # Wrap rules in 'acls:' dict for Faucet
+            data = {'acls': {name: rules}}
+
             with open(temp_file, 'w') as f:
-                yaml.dump(rules, f, default_flow_style=False)
+                yaml.dump(data, f, default_flow_style=False)
 
             temp_file.replace(acl_file)
             return True
@@ -437,7 +503,9 @@ class FaucetConfigManager:
             acl_file = self.acl_dir / f"{name}.yaml"
             if acl_file.exists():
                 with open(acl_file) as f:
-                    return yaml.safe_load(f) or []
+                    data = yaml.safe_load(f) or {}
+                    # Extract rules from 'acls' wrapper
+                    return data.get('acls', {}).get(name, [])
             return []
         except Exception as e:
             logger.error(f"Failed to read ACL {name}: {e}")

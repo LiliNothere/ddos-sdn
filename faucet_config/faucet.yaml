@@ -5,6 +5,10 @@
 # Global settings
 version: 2
 
+# Include dynamic ACL file for ML-based blocking
+include:
+  - /etc/faucet/acls/block-malicious.yaml
+
 # Meters for rate limiting (packets per second) - DEFINED ONCE
 meters:
   web-server-rate-limit:
@@ -50,7 +54,7 @@ dps:
         name: "h1"
         description: "Host h1 (Web Server)"
         native_vlan: 100
-        acls_in: [protect-web-server]
+        # acls_in removed - protect-web-server now applied at VLAN level
       2:
         name: "h2"
         description: "Host h2"
@@ -197,6 +201,9 @@ vlans:
     description: "Segment 1 (h1-h3, h16-h18) - 10.0.0.0/24"
     faucet_vips: ["10.0.0.254/24"]  # Gateway for VLAN 100
     faucet_mac: "00:00:00:00:00:01"
+    # Apply protect-web-server ACL to entire VLAN 100
+    # This ensures ALL traffic entering VLAN 100 is inspected
+    acls_in: [protect-web-server]
   200:
     name: "vlan200"
     description: "Segment 2 (h4-h6) - 10.0.1.0/24"
@@ -261,13 +268,18 @@ acls:
         actions:
           allow: true
           meter: "udp-rate-limit"
-    # Rule 6: General IPv4 to web server (catch-all, LAST)
+    # Rule 6: General IPv4 to web server (catch-all, LAST for web server)
     - rule:
         dl_type: 0x800
         nw_dst: "10.0.0.1/32"
         actions:
           allow: true
           meter: "web-server-rate-limit"
+    # Rule 7: ALLOW ALL - Default permit for traffic NOT destined to web server
+    # This prevents blocking legitimate internal traffic (e.g., h2 ping h3)
+    - rule:
+        actions:
+          allow: true
 
   # Block malicious traffic (dynamically updated by ML service)
   # Applied on INGRESS port where attack traffic ENTERS the switch
@@ -277,7 +289,7 @@ acls:
           allow: false
         cookie: 0xdeadbeef
 
-  # Default allow for legitimate traffic
+  # Default allow for legitimate traffic (fallback)
   default-allow:
     # Rule 1: Allow ARP everywhere
     - rule:

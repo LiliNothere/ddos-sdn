@@ -131,16 +131,14 @@ def evaluate_model(model_type: str, dataset_path: str = None, model_dir: str = N
     from sklearn.model_selection import train_test_split
     from ml_service.config import FEATURE_COLUMNS, TARGET_COLUMN
 
-    # Use same preprocessing as model
-    X = df[FEATURE_COLUMNS].values
-    y = df[TARGET_COLUMN].values
-
-    _, X_test, _, y_test = train_test_split(
-        X, y, test_size=settings.test_size, random_state=settings.random_state, stratify=y
+    # Use same preprocessing as model - pass raw DataFrame to predict()
+    # predict() will call _preprocess() internally
+    _, df_test, _, y_test = train_test_split(
+        df, df[TARGET_COLUMN], test_size=settings.test_size, random_state=settings.random_state, stratify=df[TARGET_COLUMN]
     )
 
-    # Predict
-    labels, confidences = model.predict(pd.DataFrame(X_test, columns=FEATURE_COLUMNS))
+    # Predict using raw DataFrame (predict calls _preprocess internally)
+    labels, confidences = model.predict(df_test)
 
     from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
     acc = accuracy_score(y_test, labels)

@@ -29,6 +29,7 @@ class SwitchState:
     """Track state per switch"""
     switch_id: str
     last_poll: float = 0
+    last_poll_time: float = 0  # Actual timestamp of last poll for rate calculation
     flow_count: int = 0
     ddos_count: int = 0
     benign_count: int = 0
@@ -66,6 +67,9 @@ class FaucetMLBridge:
 
         # Lock for atomic ACL updates
         self._acl_lock = asyncio.Lock()
+
+        # Track previous flow stats for rate calculation (delta/poll_interval)
+        self.last_flow_stats: Dict[str, Dict[str, int]] = {}  # flow_key -> {'packet_count': int, 'byte_count': int}
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -175,17 +179,47 @@ class FaucetMLBridge:
 
         # Convert to DataFrame for ML
         flow_data = []
+        current_time = time.time()
+
+        # Initialize last_flow_stats for this switch if not exists
+        if switch_id not in self.last_flow_stats:
+            self.last_flow_stats[switch_id] = {}
+
+        # Track last poll time per switch for accurate rate calculation
+        if switch_id not in self.switches[switch_id].__dict__ or not hasattr(self.switches[switch_id], 'last_poll_time'):
+            # First poll for this switch - use configured interval as estimate
+            elapsed = self.poll_interval
+        else:
+            elapsed = current_time - self.switches[switch_id].last_poll_time
+
+        # Avoid division by zero or unrealistic elapsed times
+        elapsed = max(0.1, min(elapsed, self.poll_interval * 2))
+
+        last_stats = self.last_flow_stats[switch_id]
+
         for flow in flows:
             # Determine DPID from switch_id (e.g., "s1" -> 1)
             dpid = int(switch_id.lstrip('s')) if switch_id.startswith('s') else hash(switch_id) % 1000000
+
+            # Create unique flow key for tracking
+            flow_key = f"{switch_id}:{flow.flow_id}"
+
+            # Calculate rate using delta between polls (not lifetime average)
+            last_packet_count = last_stats.get(flow_key, {}).get('packet_count', 0)
+            last_byte_count = last_stats.get(flow_key, {}).get('byte_count', 0)
+
+            delta_packets = max(0, flow.packet_count - last_packet_count)
+            delta_bytes = max(0, flow.byte_count - last_byte_count)
+
+            # Rate = delta / actual_elapsed_time (accurate for burst detection)
+            packet_rate = delta_packets / elapsed if elapsed > 0 else 0
+            byte_rate = delta_bytes / elapsed if elapsed > 0 else 0
 
             flow_data.append({
                 'timestamp': flow.timestamp,
                 'datapath_id': dpid,
                 'flow_id': flow.flow_id,
-                'ip_src': flow.ipv4_src,
                 'tp_src': flow.tcp_src or flow.udp_src or 0,
-                'ip_dst': flow.ipv4_dst,
                 'tp_dst': flow.tcp_dst or flow.udp_dst or 0,
                 'ip_proto': flow.ip_proto,
                 'icmp_code': flow.icmpv4_code or 0,
@@ -197,11 +231,21 @@ class FaucetMLBridge:
                 'flags': 0,  # Not available from Gauge
                 'packet_count': flow.packet_count,
                 'byte_count': flow.byte_count,
-                'packet_count_per_second': flow.packet_count / max(flow.duration_sec, 1),
-                'packet_count_per_nsecond': 0,
-                'byte_count_per_second': flow.byte_count / max(flow.duration_sec, 1),
-                'byte_count_per_nsecond': 0
+                'packet_count_per_second': packet_rate,
+                'packet_count_per_nsecond': packet_rate / 1e9,
+                'byte_count_per_second': byte_rate,
+                'byte_count_per_nsecond': byte_rate / 1e9
             })
+            # Note: ip_src and ip_dst removed from features to prevent data leakage
+
+            # Update last stats for next poll
+            last_stats[flow_key] = {
+                'packet_count': flow.packet_count,
+                'byte_count': flow.byte_count
+            }
+
+        # Update last poll time for this switch
+        self.switches[switch_id].last_poll_time = current_time
 
         if not flow_data:
             return
@@ -234,7 +278,7 @@ class FaucetMLBridge:
         state.flow_count = total
         state.ddos_count = ddos_count
         state.benign_count = benign_count
-        state.last_poll = time.time()
+        state.last_poll = current_time
 
         # Calculate DDoS percentage
         ddos_pct = (ddos_count / total * 100) if total > 0 else 0
@@ -341,13 +385,37 @@ class FaucetMLBridge:
                         if ip == victim_ip and port.isdigit():
                             return int(port)
 
-            # Fallback: use known topology mapping
+            # Fallback: use known topology mapping for Mininet demo
             # VLAN 100 hosts on s1 (ports 1-3) and s6 (ports 1-3)
-            # This is a simplified mapping - in production, use Faucet's learned hosts
+            # h1 (10.0.0.1) is on s1 port 1 (web server - primary victim)
+            # This ensures mitigation works even if Prometheus query fails or L2 learning disabled
+            if victim_ip == "10.0.0.1" and switch_id == "s1":
+                logger.warning(f"Using fallback victim port 1 for {victim_ip} on {switch_id}")
+                return 1
+
+            # Additional fallback mappings for other hosts in VLAN 100
+            vlan100_hosts = {
+                "10.0.0.1": 1,  # h1 on s1
+                "10.0.0.2": 2,  # h2 on s1
+                "10.0.0.3": 3,  # h3 on s1
+                "10.0.0.4": 1,  # h16 on s6
+                "10.0.0.5": 2,  # h17 on s6
+                "10.0.0.6": 3,  # h18 on s6
+            }
+
+            if victim_ip in vlan100_hosts:
+                port = vlan100_hosts[victim_ip]
+                logger.warning(f"Using fallback victim port {port} for {victim_ip} on {switch_id}")
+                return port
+
+            logger.warning(f"No victim port mapping found for {victim_ip} on {switch_id}")
             return None
 
         except Exception as e:
             logger.error(f"Failed to find victim port: {e}")
+            # Emergency fallback for demo: assume web server on s1 port 1
+            if switch_id == "s1":
+                return 1
             return None
 
     async def _apply_mitigation_with_lock(self, switch_id: str, port: int, block: bool = True) -> bool:

@@ -12,24 +12,14 @@ from pathlib import Path
 from typing import List, Tuple
 import sys
 
+# Import centralized feature columns from config
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Feature columns (must match ml_service/config.py NUMERIC_FEATURE_COLUMNS)
-NUMERIC_FEATURE_COLUMNS = [
-    'timestamp', 'datapath_id', 'tp_src',
-    'tp_dst', 'ip_proto', 'icmp_code', 'icmp_type',
-    'flow_duration_sec', 'flow_duration_nsec', 'idle_timeout',
-    'hard_timeout', 'flags', 'packet_count', 'byte_count',
-    'packet_count_per_second', 'packet_count_per_nsecond',
-    'byte_count_per_second', 'byte_count_per_nsecond'
-]
+from ml_service.config import NUMERIC_FEATURE_COLUMNS, TARGET_COLUMN
 
-# IP columns (will be encoded to network/host)
-IP_COLUMNS = ['ip_src', 'ip_dst']
-
-# Full columns for CSV output
-FULL_FEATURE_COLUMNS = NUMERIC_FEATURE_COLUMNS + IP_COLUMNS
-
-TARGET_COLUMN = 'label'  # 0 = benign, 1 = ddos
+# Full columns for CSV output (no IP columns)
+FULL_FEATURE_COLUMNS = NUMERIC_FEATURE_COLUMNS.copy()
 
 
 class DDoSDatasetGenerator:
@@ -68,7 +58,7 @@ class DDoSDatasetGenerator:
         return self.datapath_counter
 
     def _random_ip(self, vlan: int = None) -> str:
-        """Generate random IP within VLAN range"""
+        """Generate random IP within VLAN range (kept for internal logic but not in output)"""
         if vlan is None:
             vlan = random.choice(list(self.VLAN_IPS.keys()))
         base = self.VLAN_IPS[vlan]
@@ -79,6 +69,13 @@ class DDoSDatasetGenerator:
         if is_common and random.random() < 0.7:
             return random.choice(self.COMMON_PORTS)
         return random.randint(1024, 65535)
+
+    def _make_duration_multiple_of_10(self, base_duration: int) -> int:
+        """Ensure flow_duration_sec is a multiple of 10 (matching Gauge poll interval)"""
+        if base_duration <= 0:
+            return 10
+        # Round up to nearest multiple of 10
+        return ((base_duration + 9) // 10) * 10
 
     def generate_benign_flow(self, timestamp: float = None) -> dict:
         """Generate a single benign flow"""
@@ -91,22 +88,39 @@ class DDoSDatasetGenerator:
         src_vlan = random.choice(list(self.VLAN_IPS.keys()))
         dst_vlan = random.choice(list(self.VLAN_IPS.keys()))
 
+        # Base duration, then make it multiple of 10
+        if proto == 6:  # TCP
+            if random.random() < 0.5:
+                # Web traffic: short bursts
+                base_duration = random.randint(1, 30)
+            else:
+                # SSH/other: longer
+                base_duration = random.randint(60, 3600)
+        elif proto == 17:  # UDP
+            if random.random() < 0.5:
+                # DNS: very short
+                base_duration = random.randint(0, 2)
+            else:
+                base_duration = random.randint(1, 60)
+        else:  # ICMP
+            base_duration = random.randint(0, 5)
+
+        flow_duration_sec = self._make_duration_multiple_of_10(base_duration)
+
         flow = {
             'timestamp': timestamp,
             'datapath_id': self._next_datapath_id(),
             'flow_id': self._next_flow_id(),
-            'ip_src': self._random_ip(src_vlan),
             'tp_src': self._random_port(),
-            'ip_dst': self._random_ip(dst_vlan),
             'tp_dst': self._random_port(),
             'ip_proto': proto,
             'icmp_code': 0,
             'icmp_type': 0,
-            'flow_duration_sec': 0,
-            'flow_duration_nsec': 0,
+            'flow_duration_sec': flow_duration_sec,
+            'flow_duration_nsec': random.randint(0, 999999999),
             'idle_timeout': random.randint(10, 300),
             'hard_timeout': random.randint(300, 3600),
-            'flags': random.randint(0, 255) if proto == 6 else 0,
+            'flags': 0,  # Fixed to 0 for DecisionTree compatibility
             'packet_count': 0,
             'byte_count': 0,
             'packet_count_per_second': 0.0,
@@ -127,42 +141,35 @@ class DDoSDatasetGenerator:
             # Web browsing, API calls, etc.
             if flow['tp_dst'] in self.HTTP_PORTS + self.HTTPS_PORTS:
                 # HTTP traffic: short bursts
-                flow['flow_duration_sec'] = random.randint(1, 30)
                 flow['packet_count'] = random.randint(10, 500)
                 flow['byte_count'] = flow['packet_count'] * random.randint(500, 1500)
             elif flow['tp_dst'] in self.SSH_PORTS:
                 # SSH: long-lived, low rate
-                flow['flow_duration_sec'] = random.randint(60, 3600)
                 flow['packet_count'] = random.randint(100, 2000)
                 flow['byte_count'] = flow['packet_count'] * random.randint(200, 800)
             else:
-                flow['flow_duration_sec'] = random.randint(1, 300)
                 flow['packet_count'] = random.randint(5, 1000)
                 flow['byte_count'] = flow['packet_count'] * random.randint(100, 2000)
 
         elif proto == 17:  # UDP
             if flow['tp_dst'] in self.DNS_PORTS:
                 # DNS: very short
-                flow['flow_duration_sec'] = random.randint(0, 2)
                 flow['packet_count'] = random.randint(2, 20)
                 flow['byte_count'] = flow['packet_count'] * random.randint(100, 500)
             else:
-                flow['flow_duration_sec'] = random.randint(1, 60)
                 flow['packet_count'] = random.randint(5, 200)
                 flow['byte_count'] = flow['packet_count'] * random.randint(200, 1000)
 
         else:  # ICMP
-            flow['flow_duration_sec'] = random.randint(0, 5)
             flow['packet_count'] = random.randint(1, 10)
             flow['byte_count'] = flow['packet_count'] * random.randint(64, 512)
 
-        # Calculate rates
+        # Calculate rates based on flow_duration_sec (multiple of 10)
         dur = max(flow['flow_duration_sec'], 1)
         flow['packet_count_per_second'] = flow['packet_count'] / dur
         flow['byte_count_per_second'] = flow['byte_count'] / dur
         flow['packet_count_per_nsecond'] = flow['packet_count'] / (dur * 1e9)
         flow['byte_count_per_nsecond'] = flow['byte_count'] / (dur * 1e9)
-        flow['flow_duration_nsec'] = random.randint(0, 999999999)
 
         return flow
 
@@ -197,22 +204,36 @@ class DDoSDatasetGenerator:
         dst_vlan = 100
         dst_ip = self._random_ip(dst_vlan)
 
+        # Base duration for attack flows
+        if attack_type == 'syn_flood':
+            base_duration = random.randint(0, 2)
+        elif attack_type == 'udp_flood':
+            base_duration = random.randint(1, 10)
+        elif attack_type == 'icmp_flood':
+            base_duration = random.randint(1, 30)
+        elif attack_type == 'http_flood':
+            base_duration = random.randint(1, 60)
+        elif attack_type == 'slowloris':
+            base_duration = random.randint(300, 3600)
+        else:
+            base_duration = random.randint(1, 10)
+
+        flow_duration_sec = self._make_duration_multiple_of_10(base_duration)
+
         flow = {
             'timestamp': timestamp,
             'datapath_id': self._next_datapath_id(),
             'flow_id': self._next_flow_id(),
-            'ip_src': src_ip,
             'tp_src': self._random_port(is_common=False),
-            'ip_dst': dst_ip,
             'tp_dst': self._get_target_port(attack_type),
             'ip_proto': proto,
             'icmp_code': 0,
             'icmp_type': 0,
-            'flow_duration_sec': 0,
-            'flow_duration_nsec': 0,
+            'flow_duration_sec': flow_duration_sec,
+            'flow_duration_nsec': random.randint(0, 999999999),
             'idle_timeout': random.randint(1, 10),  # Short timeouts for attack flows
             'hard_timeout': random.randint(10, 60),
-            'flags': 2 if attack_type == 'syn_flood' else (random.randint(0, 255) if proto == 6 else 0),  # SYN flag
+            'flags': 0,  # Fixed to 0 for DecisionTree compatibility (was 2 for SYN)
             'packet_count': 0,
             'byte_count': 0,
             'packet_count_per_second': 0.0,
@@ -230,41 +251,35 @@ class DDoSDatasetGenerator:
         # Generate attack-specific patterns
         if attack_type == 'syn_flood':
             # Many SYN packets, few bytes each, very short flows
-            flow['flow_duration_sec'] = random.randint(0, 2)
             flow['packet_count'] = random.randint(100, 10000)
             flow['byte_count'] = flow['packet_count'] * random.randint(40, 80)  # Small SYN packets
 
         elif attack_type == 'udp_flood':
             # High volume UDP
-            flow['flow_duration_sec'] = random.randint(1, 10)
             flow['packet_count'] = random.randint(500, 50000)
             flow['byte_count'] = flow['packet_count'] * random.randint(512, 1500)
 
         elif attack_type == 'icmp_flood':
             # ICMP echo requests
-            flow['flow_duration_sec'] = random.randint(1, 30)
             flow['packet_count'] = random.randint(100, 20000)
             flow['byte_count'] = flow['packet_count'] * random.randint(64, 1500)
 
         elif attack_type == 'http_flood':
             # HTTP GET/POST floods
-            flow['flow_duration_sec'] = random.randint(1, 60)
             flow['packet_count'] = random.randint(50, 5000)
             flow['byte_count'] = flow['packet_count'] * random.randint(500, 2000)
 
         elif attack_type == 'slowloris':
             # Slowloris: long duration, low packet rate
-            flow['flow_duration_sec'] = random.randint(300, 3600)
             flow['packet_count'] = random.randint(10, 200)
             flow['byte_count'] = flow['packet_count'] * random.randint(200, 1000)
 
-        # Calculate rates (high for DDoS)
+        # Calculate rates (high for DDoS) based on flow_duration_sec (multiple of 10)
         dur = max(flow['flow_duration_sec'], 1)
         flow['packet_count_per_second'] = flow['packet_count'] / dur
         flow['byte_count_per_second'] = flow['byte_count'] / dur
         flow['packet_count_per_nsecond'] = flow['packet_count'] / (dur * 1e9)
         flow['byte_count_per_nsecond'] = flow['byte_count'] / (dur * 1e9)
-        flow['flow_duration_nsec'] = random.randint(0, 999999999)
 
         return flow
 
@@ -353,7 +368,7 @@ def main():
     generator = DDoSDatasetGenerator(seed=args.seed)
     df = generator.generate_dataset(args.benign, args.ddos, args.time_span)
 
-    # Ensure all feature columns are present and in correct order
+    # Ensure all feature columns are present and in correct order (no IP columns)
     cols = FULL_FEATURE_COLUMNS + [TARGET_COLUMN]
     df = df[cols]
 

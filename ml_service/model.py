@@ -25,38 +25,16 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 import joblib
 
-from .config import settings, MODEL_PARAMS, FEATURE_COLUMNS, TARGET_COLUMN
+from .config import settings, MODEL_PARAMS, NUMERIC_FEATURE_COLUMNS, TARGET_COLUMN
 
 logger = logging.getLogger(__name__)
 
-# Feature columns that should be used as numeric features
-# Exclude: flow_id (identifier), ip_src, ip_dst (categorical - need encoding)
-NUMERIC_FEATURE_COLUMNS = [
-    'timestamp', 'datapath_id', 'tp_src',
-    'tp_dst', 'ip_proto', 'icmp_code', 'icmp_type',
-    'flow_duration_sec', 'flow_duration_nsec', 'idle_timeout',
-    'hard_timeout', 'flags', 'packet_count', 'byte_count',
-    'packet_count_per_second', 'packet_count_per_nsecond',
-    'byte_count_per_second', 'byte_count_per_nsecond'
-]
+# Feature columns are now defined in config.py as NUMERIC_FEATURE_COLUMNS
+# to ensure single source of truth across model, training, and data generation
 
 # Columns that need special handling
 ID_COLUMNS = ['flow_id']
-IP_COLUMNS = ['ip_src', 'ip_dst']
-
-
-def encode_ip(ip_str: str) -> Tuple[int, int]:
-    """Encode IP address into two numeric features: (network_part, host_part)"""
-    try:
-        parts = ip_str.split('.')
-        if len(parts) == 4:
-            # Use first 3 octets as network, last as host
-            network = int(parts[0]) * 256 * 256 + int(parts[1]) * 256 + int(parts[2])
-            host = int(parts[3])
-            return network, host
-    except (ValueError, AttributeError):
-        pass
-    return 0, 0
+# IP_COLUMNS removed - IP features dropped to prevent data leakage
 
 
 class DDoSModel:
@@ -73,7 +51,6 @@ class DDoSModel:
         self.training_time = 0.0
         self.accuracy = 0.0
         self.metadata = {}
-        self._scaler = StandardScaler()
 
     def _get_model(self):
         """Get model instance based on type"""
@@ -91,40 +68,24 @@ class DDoSModel:
         model_class = models.get(self.model_type, RandomForestClassifier)
         return model_class(**params)
 
-    def _preprocess(self, df: pd.DataFrame, fit_scaler: bool = False) -> np.ndarray:
-        """Preprocess features: handle IPs, select numeric features, scale"""
-        df = df.copy()
+    def _preprocess(self, df: pd.DataFrame) -> np.ndarray:
+        """Preprocess features: handle missing values, select numeric features only.
 
-        # Encode IP columns into numeric features
-        for ip_col in IP_COLUMNS:
-            if ip_col in df.columns:
-                encoded = df[ip_col].apply(encode_ip)
-                df[f'{ip_col}_network'] = encoded.apply(lambda x: x[0])
-                df[f'{ip_col}_host'] = encoded.apply(lambda x: x[1])
+        Note: IP columns (ip_src, ip_dst) are deliberately excluded to prevent data leakage.
+        Scaling is handled by the Pipeline during train/predict.
+        """
+        df = df.copy()
 
         # Ensure all numeric feature columns exist
         for col in self.feature_columns:
             if col not in df.columns:
                 df[col] = 0
 
-        # Add encoded IP features to feature list
-        ip_features = []
-        for ip_col in IP_COLUMNS:
-            ip_features.extend([f'{ip_col}_network', f'{ip_col}_host'])
-
-        all_features = self.feature_columns + ip_features
-
-        # Select features
-        X = df[all_features].values.astype(np.float64)
+        # Select only numeric features (no IP columns)
+        X = df[self.feature_columns].values.astype(np.float64)
 
         # Handle NaN/inf
         X = np.nan_to_num(X, nan=0.0, posinf=1e10, neginf=-1e10)
-
-        # Scale features using pipeline scaler
-        if fit_scaler:
-            X = self._scaler.fit_transform(X)
-        else:
-            X = self._scaler.transform(X)
 
         return X
 
@@ -138,13 +99,16 @@ class DDoSModel:
         return y
 
     def train(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Train the model with proper train/test split before scaling"""
+        """Train the model with proper train/test split BEFORE scaling.
+
+        Pipeline handles scaling internally - fit only on training data.
+        """
         start_time = time.time()
 
         logger.info(f"Training {self.model_type} model on {len(df)} samples")
 
-        # Preprocess (fit scaler on full data for now, but we should use pipeline)
-        X = self._preprocess(df, fit_scaler=True)
+        # Preprocess features (no scaling here - Pipeline will handle it)
+        X = self._preprocess(df)
         y = self._preprocess_labels(df)
 
         # Check label distribution
@@ -154,8 +118,7 @@ class DDoSModel:
         if len(unique_labels) < 2:
             logger.warning("Only one class in training data, model may not generalize")
 
-        # Split BEFORE any further processing (but after initial preprocessing)
-        # Note: Scaler already fit on full data above. For proper pipeline, we should refactor.
+        # Split FIRST, before any scaling (Pipeline will fit scaler on train only)
         X_train, X_test, y_train, y_test = train_test_split(
             X, y,
             test_size=settings.test_size,
@@ -163,14 +126,13 @@ class DDoSModel:
             stratify=y if len(unique_labels) > 1 else None
         )
 
-        # Train
+        # Train using Pipeline (scaler fit only on training data)
         base_model = self._get_model()
         self.model = Pipeline([
             ('scaler', StandardScaler()),
             ('classifier', base_model)
         ])
 
-        # Re-fit with pipeline (scaler will be fit only on train)
         self.model.fit(X_train, y_train)
 
         # Evaluate on test set
@@ -195,7 +157,7 @@ class DDoSModel:
             "training_time": self.training_time,
             "n_samples": len(df),
             "n_features": X.shape[1],
-            "feature_names": self.feature_columns + [f'{ip}_network' for ip in IP_COLUMNS] + [f'{ip}_host' for ip in IP_COLUMNS],
+            "feature_names": self.feature_columns,
             "confusion_matrix": {
                 "tn": int(tn), "fp": int(fp),
                 "fn": int(fn), "tp": int(tp)
@@ -215,7 +177,7 @@ class DDoSModel:
         if not self.is_trained or self.model is None:
             raise ValueError("Model not trained")
 
-        X = self._preprocess(df, fit_scaler=False)
+        X = self._preprocess(df)
 
         # Predict
         labels = self.model.predict(X)

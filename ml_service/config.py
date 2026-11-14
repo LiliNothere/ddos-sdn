@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     faucet_rest_port: int = 9302
     gauge_prometheus_port: int = 9303
     faucet_acl_name: str = "block-malicious"
+    # Ports >= this value are considered trunk/inter-switch ports and won't be blocked
+    faucet_trunk_port_threshold: int = 4
 
     # Mitigation settings
     mitigation_duration: int = 120  # seconds
@@ -79,6 +81,7 @@ def get_settings() -> Settings:
         faucet_rest_port=ml_config.faucet_rest_port,
         gauge_prometheus_port=ml_config.gauge_prometheus_port,
         faucet_acl_name=ml_config.faucet_acl_name,
+        faucet_trunk_port_threshold=getattr(ml_config, 'faucet_trunk_port_threshold', 4),
         mitigation_duration=ml_config.mitigation_duration,
         mitigation_cooldown=ml_config.mitigation_cooldown,
         metrics_enabled=ml_config.metrics_enabled,
@@ -132,18 +135,15 @@ MODEL_PARAMS = {
     }
 }
 
-# Feature columns (must match training data)
+# Feature columns (must match training data) - IP columns removed to prevent data leakage
 FEATURE_COLUMNS = [
-    'timestamp', 'datapath_id', 'flow_id', 'ip_src', 'tp_src',
-    'ip_dst', 'tp_dst', 'ip_proto', 'icmp_code', 'icmp_type',
+    'timestamp', 'datapath_id', 'flow_id', 'tp_src',
+    'tp_dst', 'ip_proto', 'icmp_code', 'icmp_type',
     'flow_duration_sec', 'flow_duration_nsec', 'idle_timeout',
     'hard_timeout', 'flags', 'packet_count', 'byte_count',
     'packet_count_per_second', 'packet_count_per_nsecond',
     'byte_count_per_second', 'byte_count_per_nsecond'
 ]
-
-# Columns to preprocess (remove dots from IPs) - NOT USED, we encode IPs differently now
-IP_COLUMNS = ['ip_src', 'ip_dst']
 
 # Target column
 TARGET_COLUMN = 'label'  # 0 = benign, 1 = ddos

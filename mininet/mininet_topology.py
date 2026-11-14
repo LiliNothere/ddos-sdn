@@ -57,41 +57,43 @@ class DDoSTopo(Topo):
 
         # Connect hosts to switches (matching faucet.yaml port mapping)
         # s1: h1(1), h2(2), h3(3), s2(4)
-        self.addLink(hosts['h1'], switches['s1'], port1=0, port2=1)
-        self.addLink(hosts['h2'], switches['s1'], port1=0, port2=2)
-        self.addLink(hosts['h3'], switches['s1'], port1=0, port2=3)
+        # h1 (web server) gets bw=10 Mbps to simulate bottleneck, others 100 Mbps
+        # All links get 1ms delay for realistic latency
+        self.addLink(hosts['h1'], switches['s1'], port1=0, port2=1, bw=10, delay='1ms')
+        self.addLink(hosts['h2'], switches['s1'], port1=0, port2=2, bw=100, delay='1ms')
+        self.addLink(hosts['h3'], switches['s1'], port1=0, port2=3, bw=100, delay='1ms')
 
         # s2: h4(1), h5(2), h6(3), s1(4), s3(5)
-        self.addLink(hosts['h4'], switches['s2'], port1=0, port2=1)
-        self.addLink(hosts['h5'], switches['s2'], port1=0, port2=2)
-        self.addLink(hosts['h6'], switches['s2'], port1=0, port2=3)
+        self.addLink(hosts['h4'], switches['s2'], port1=0, port2=1, bw=100, delay='1ms')
+        self.addLink(hosts['h5'], switches['s2'], port1=0, port2=2, bw=100, delay='1ms')
+        self.addLink(hosts['h6'], switches['s2'], port1=0, port2=3, bw=100, delay='1ms')
 
         # s3: h7(1), h8(2), h9(3), s2(4), s4(5)
-        self.addLink(hosts['h7'], switches['s3'], port1=0, port2=1)
-        self.addLink(hosts['h8'], switches['s3'], port1=0, port2=2)
-        self.addLink(hosts['h9'], switches['s3'], port1=0, port2=3)
+        self.addLink(hosts['h7'], switches['s3'], port1=0, port2=1, bw=100, delay='1ms')
+        self.addLink(hosts['h8'], switches['s3'], port1=0, port2=2, bw=100, delay='1ms')
+        self.addLink(hosts['h9'], switches['s3'], port1=0, port2=3, bw=100, delay='1ms')
 
         # s4: h10(1), h11(2), h12(3), s3(4), s5(5)
-        self.addLink(hosts['h10'], switches['s4'], port1=0, port2=1)
-        self.addLink(hosts['h11'], switches['s4'], port1=0, port2=2)
-        self.addLink(hosts['h12'], switches['s4'], port1=0, port2=3)
+        self.addLink(hosts['h10'], switches['s4'], port1=0, port2=1, bw=100, delay='1ms')
+        self.addLink(hosts['h11'], switches['s4'], port1=0, port2=2, bw=100, delay='1ms')
+        self.addLink(hosts['h12'], switches['s4'], port1=0, port2=3, bw=100, delay='1ms')
 
         # s5: h13(1), h14(2), h15(3), s4(4), s6(5)
-        self.addLink(hosts['h13'], switches['s5'], port1=0, port2=1)
-        self.addLink(hosts['h14'], switches['s5'], port1=0, port2=2)
-        self.addLink(hosts['h15'], switches['s5'], port1=0, port2=3)
+        self.addLink(hosts['h13'], switches['s5'], port1=0, port2=1, bw=100, delay='1ms')
+        self.addLink(hosts['h14'], switches['s5'], port1=0, port2=2, bw=100, delay='1ms')
+        self.addLink(hosts['h15'], switches['s5'], port1=0, port2=3, bw=100, delay='1ms')
 
         # s6: h16(1), h17(2), h18(3), s5(4)
-        self.addLink(hosts['h16'], switches['s6'], port1=0, port2=1)
-        self.addLink(hosts['h17'], switches['s6'], port1=0, port2=2)
-        self.addLink(hosts['h18'], switches['s6'], port1=0, port2=3)
+        self.addLink(hosts['h16'], switches['s6'], port1=0, port2=1, bw=100, delay='1ms')
+        self.addLink(hosts['h17'], switches['s6'], port1=0, port2=2, bw=100, delay='1ms')
+        self.addLink(hosts['h18'], switches['s6'], port1=0, port2=3, bw=100, delay='1ms')
 
-        # Inter-switch links (tagged VLANs)
-        self.addLink(switches['s1'], switches['s2'], port1=4, port2=4)
-        self.addLink(switches['s2'], switches['s3'], port1=5, port2=4)
-        self.addLink(switches['s3'], switches['s4'], port1=5, port2=4)
-        self.addLink(switches['s4'], switches['s5'], port1=5, port2=4)
-        self.addLink(switches['s5'], switches['s6'], port1=5, port2=4)
+        # Inter-switch links (tagged VLANs) - higher bandwidth for trunk links
+        self.addLink(switches['s1'], switches['s2'], port1=4, port2=4, bw=1000, delay='1ms')
+        self.addLink(switches['s2'], switches['s3'], port1=5, port2=4, bw=1000, delay='1ms')
+        self.addLink(switches['s3'], switches['s4'], port1=5, port2=4, bw=1000, delay='1ms')
+        self.addLink(switches['s4'], switches['s5'], port1=5, port2=4, bw=1000, delay='1ms')
+        self.addLink(switches['s5'], switches['s6'], port1=5, port2=4, bw=1000, delay='1ms')
 
 
 def setup_faucet_ovs():
